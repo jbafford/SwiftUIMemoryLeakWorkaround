@@ -1,17 +1,19 @@
-# SwiftUI Leak Workaround
+# SwiftUI Memory Leak Workaround
 
 
 A workaround to a memory leak with SwiftUI sheets in iOS 17/macOS 14.
 
 - [The Problem](#the-problem)
+- [The Solution](#the-solution)
 - [Usage](#usage)
+- [Examples](#examples)
 - [TODO](#todo)
 - [License](#license)
 
 
 ## The Problem
 
-The new Observation framework in iOS 17 (and aligned macOS, tvOS, and watchOS platforms) retains strong references to reference objects it is tracking. This appears to combine with an issue in SwiftUI that causes objects in views to not always be released when the view is dismissed.
+The new Observation framework in iOS 17 (and aligned macOS, tvOS, and watchOS releases) retains strong references to reference objects it is tracking. This appears to combine with an issue in SwiftUI that causes objects in views to not always be released when the view is dismissed.
 
 This manifests when a SwiftUI view presents a `sheet` or `fullScreenCover` and the view captures an object. The object is retained by the system, but is not released when the presented view goes away.
 
@@ -24,6 +26,17 @@ This bug is present in at least iOS 17.0 .. 17.1b3.
 This package provides a way to resolve the problem in a way that should be relatively backwards-compatible when the OS bug is eventually fixed.
 
 
+## The Solution
+
+The solution is to instead have `UIViewController` handle the presentation of sheets. This is accomplished by injecting a coordinator object into the SwiftUI environment that has a `UIViewController` that is the parent of the SwiftUI view. Then, the SwiftUI view is modified to call the coordinator, rather than `sheet` or `fullScreenCover` directly. The coordinator uses its stored view controller to present a new view, and creates a new coordinator to inject into the sheet view with the child view controller.
+
+An extension on `View` provides accessors (`leak_workaround_sheet` and `leak_workaround_fullScreenCover`) that create a view modifier that uses the coordinator to trigger presentation. In the event the coordinator is not set or is set to `nil`, it falls back to the system behavior.
+
+The included Example.xcodeproj demonstrates both the problem and the solution.
+
+This is not a perfect solution. Sometimes, the coordinator itself is leaked. The coordinator object contains two weak references and an optional UUID, and so is relatively tiny compared to the view models that would likely be leaked instead.
+
+
 ## Usage
 
 * Create a new `SwiftUIMemoryLeakWorkaround` coordinator
@@ -32,6 +45,10 @@ This package provides a way to resolve the problem in a way that should be relat
 * Instead of `sheet(item:, ...)` or `fullScreenCover(item:, ...)`, call `leak_workaround_sheet` and `leak_workaround_fullScreenCover`.
 * Present your root SwiftUI view from UIKit.
 
+Once the bug in the system is fixed, your application can test for the fixed version of the OS. In that case, you can set the environment value for the coordinator to `nil`, or simply not set it at all.
+
+
+### Examples
 
 #### Presentation Example
 
@@ -83,20 +100,34 @@ present(SwiftUIViewController(), animated: true)
 #### SwiftUI View Example
 
 ```swift
-struct SomeSwiftUIView : View {
-	let viewModel: SomeSwiftUIViewModel
+@Observable final class SheetViewModel {
 	let depth: Int
 	
-	let item: SomeSwiftUIViewModel?
+	init(_ depth: Int) {
+		self.depth = depth
+		print("• init")
+	}
+	
+	deinit { print("• deinit") }
+	
+	func newChild() -> SheetViewModel {
+		let child = SheetViewModel(depth + 1)
+	}
+}
+
+struct SomeSwiftUIView : View {
+	let viewModel: SheetViewModel
+	
+	@State var child: SheetViewModel?
 	
 	var body: some View {
 		Button {
-			item = viewModel
+			child = viewModel.newChild()
 		} label: {
-			Label("Nest View \(depth)")
+			Label("Nest View \(viewModel.depth)")
 		}
-		.leak_workaround_sheet(item: $item) {
-			SomeSwiftUIView(viewModel: viewModel, depth: depth + 1)
+		.leak_workaround_sheet(item: $child) {
+			SomeSwiftUIView(viewModel: child)
 		}
 	}
 }
@@ -105,7 +136,7 @@ struct SomeSwiftUIView : View {
 
 ## TODO
 * Blog post
-* Docs: iOS < 17; what to do when the OS bug is fixed
+* Docs: iOS < 17
 * Add macOS (AppKit) support
 * Add watchOS support
 * Add tvOS support
